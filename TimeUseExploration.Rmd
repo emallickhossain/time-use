@@ -1,0 +1,477 @@
+---
+title: "Time Use Exploration"
+author: "Mallick Hossain"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    theme: readable
+    toc: yes
+    toc_float: no
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(cache.path = "../../../../../Desktop/TimeData/cache")
+library(data.table)
+library(bit64)
+library(plotly)
+library(purrr)
+```
+
+# Introduction 
+
+This report will explore a variety of trends in American time use that have 
+occurred over the past 12 years, which has been gathered using the American 
+Time Use Survey published by the Bureau of Labor Statistics. In particular, this
+report will start off by introducing a wide range of trends that can be seen in 
+the data. Later in the report, we will explore various explanations for the 
+underlying causes of these trends. 
+
+# Data Description
+
+The American Time Use Survey (ATUS) is a nationally representative survey of how
+Americans spend their time. It began in January 2003 and has been collected
+regularly since then. Households that complete their final (8th) month of the
+Current Population Survey are eligible for the ATUS. Households are selected to
+represent a range of demographics and within that household, one person age 15
+or older is randomly chosen. That person is interviewed between 2-5 months after
+the household's final CPS interview (majority are interviewed within 3 months.
+The interview asks respondents to collect a detailed account of their activities
+(including exact time intervals) over the 24 hour period from 4am of the previous
+day to 4am of the interview day. For each activity, the duration, location, and
+other participants are also recorded. Activities are classified across over 400
+different detailed categories.
+
+The 2003 wave of the ATUS has information on over 20,000 respondents and each of
+the successive waves has included about 13,000 respondents.
+
+# Summary Statistics
+In this section, we look at some summary statistics related to how time use varies
+by gender, location, and other groups. First I load and merge the relevant data
+(namely activity level data with the demographics of each respondent) and create 
+indicators for home/non-home locations and age groups.
+```{r loadMerge, echo = FALSE, include = FALSE, eval = FALSE}
+# Loading the data
+timeUse <- fread("~/Desktop/TimeData/atusact_0315/atusact_0315.dat")
+demographics <- fread("~/Desktop/TimeData/atussum_0315/atussum_0315.dat")
+
+# Dropping activity columns from demographics data table (already contained in
+# timeUse data table)
+activityCols <- grep("t", names(demographics))
+demographics[, (activityCols) := NULL]
+
+# Merging data
+setkey(timeUse, "TUCASEID")
+setkey(demographics, "TUCASEID")
+mergedData <- timeUse[demographics]
+timeUse <- mergedData
+rm(mergedData, demographics, activityCols)
+
+# Generating years, home dummy, and age group
+timeUse[, `:=`(TUYEAR = as.integer(substr(TUCASEID, 1, 4)),
+              home = ifelse(TEWHERE == -1, -1,
+                     ifelse(TEWHERE == -2, -2,
+                     ifelse(TEWHERE == -3, -3,
+                     ifelse(TEWHERE == 1, 1, 2)))),
+              ageGroup = ifelse(TEAGE >= 18 & TEAGE <= 24, 1,
+                         ifelse(TEAGE >= 25 & TEAGE <= 54, 2,
+                         ifelse(TEAGE >= 55 & TEAGE <= 64, 3,
+                         ifelse(TEAGE >= 65, 4, NA)))))]
+
+# Labeling gender
+timeUse$TESEX <- factor(timeUse$TESEX, levels = c(1, 2),
+                        labels = c("Male", "Female"))
+
+# Labeling location
+timeUse$home <- factor(timeUse$home, levels = c(-1, -2, -3, 1, 2),
+                        labels = c("Blank", "Don't Know", "Refused", "Home", "Away"))
+
+# Labeling age groups
+timeUse$ageGroup <- factor(timeUse$ageGroup, levels = c(1, 2, 3, 4),
+                           labels = c("18-24", "25-54", "55-64", "65+"))
+
+# Labeling metro areas
+timeUse$GTMETSTA <- factor(timeUse$GTMETSTA, levels = c(-1, 1, 2, 3),
+                           labels = c("Blank", "Metro", 
+                                      "Non-Metro", "Not Identified"))
+
+# Labeling 2 digit activity categories. Note that converting to factors
+# changes the levels to from 1 to 18 instead of from 1 to 16, 18, and 50.
+timeUse$TRTIER1P <- factor(timeUse$TRTIER1P, levels = c(1:16, 18, 50),
+                           labels = activities <- c("Personal Care",
+                                                    "Household Activities",
+                                                    "Caring for and Helping HH Members",
+                                                    "Caring for and Helping non-HH Members",
+                                                    "Work and Related Activities",
+                                                    "Education",
+                                                    "Consumer Purchases",
+                                                    "Professional and Personal Care Services",
+                                                    "Household Services",
+                                                    "Government Services and Civics",
+                                                    "Eating and Drinking",
+                                                    "Socializing, Relaxing, and Leisure",
+                                                    "Sports, Exercise, and Recreation",
+                                                    "Religion",
+                                                    "Volunteering",
+                                                    "Telephone Calls",
+                                                    "Traveling",
+                                                    "Unknown"))
+
+save(timeUse, file = "~/Desktop/TimeData/data/timeUseMerged.rda", compress = TRUE)
+rm(list = ls())
+```
+
+Then, we can clean the data to obtain the groups we are concerned with. I remove
+any repondents younger than 18
+```{r filterData, echo = FALSE, include = FALSE, eval = FALSE}
+load(file = "~/Desktop/TimeData/data/timeUseMerged.rda")
+
+# Dropping observations of those younger than 18 (7,541 respondents)
+before <- length(unique(timeUse$TUCASEID))
+timeUse <- timeUse[TEAGE >= 18]
+after <- length(unique(timeUse$TUCASEID))
+before - after
+
+## Dropping observations that were missing, can't remember, or other insufficient data (removing 30,501 activity obs)
+#timeUse <- timeUse[TRTIER1P != 50]
+
+save(timeUse, file = "~/Desktop/TimeData/data/timeUseClean.rda", compress = TRUE)
+rm(list = ls())
+```
+
+# Activity Level Analysis
+Now I collapse the data by activity. 
+* NOTE: for research related to the actual time of day when people do particular 
+activities, this is where you have to start fixing the code.
+* NOTE: for location data, this is where you have to fix the code.
+```{r labeling, echo = FALSE, include = FALSE, eval = FALSE}
+load(file = "~/Desktop/TimeData/data/timeUseClean.rda")
+
+# Summing activities by household and year to get average weekly hours while
+# preserving all household information.
+timeUse <- timeUse[, .(weeklyHours = sum(TUACTDUR24) / 60 * 7),
+                   by = .(TUCASEID, TRTIER1P, TRTIER2P, TRCODEP, TEWHERE, GEMETSTA,
+                          GTMETSTA, PEEDUCA, PEHSPNON, PTDTRACE, TEAGE, TELFS,
+                          TESCHENR, TESCHLVL, TESEX, TESPEMPNOT, TRCHILDNUM,
+                          TRDPFTPT, TRERNWA, TRYHHCHILD, TUDIARYDAY, TUFNWGTP,
+                          TUYEAR, home, ageGroup)]
+
+# Quality check for computed weekly hours
+qualityCheck <- timeUse[, sum(weeklyHours), by = TUCASEID]
+
+# Saving cleaned data
+save(timeUse, file = "~/Desktop/TimeData/data/timeUseActivity.rda", compress = TRUE)
+rm(list = ls())
+```
+
+Now I write a function that will flexibly allow analysis of trends in time use by group.
+```{r aggFunction, eval = TRUE, warning = FALSE, echo = FALSE}
+load(file = "~/Desktop/TimeData/data/timeUseActivity.rda")
+activities <- levels(timeUse$TRTIER1P)
+plots <- list()
+
+codeColumn <- function(code) {
+  if (nchar(code) %in% c(5, 6)) {
+    codeLevel <- quote(TRCODEP)
+  } else if (nchar(code) %in% c(3, 4)) {
+    codeLevel <- quote(TRTIER2P)
+  } else if (nchar(code) %in% c(1, 2)) {
+    codeLevel <- quote(TRTIER1P)
+  }
+  return(codeLevel)
+}
+
+category <- function(groupName) {
+    if (groupName == "sex") {
+    lineCat <- c("TESEX")
+  } else if (groupName == "age") {
+    lineCat <- c("ageGroup")
+  } else if (groupName == "ageSex") {
+    lineCat <- c("TESEX", "ageGroup")
+  } else if (groupName == "metro") {
+    lineCat <- c("GTMETSTA")
+  } else if (groupName == "sexMetro") {
+    lineCat <- c("GTMETSTA", "TESEX")
+  } else if (groupName == "ageMetro") {
+    lineCat <- c("GTMETSTA", "ageGroup")
+  } else {
+    stop("Aggregation not implemented yet.")
+  }
+  group <- c("TUYEAR", lineCat)
+  return(list(lineCat = lineCat, group = group))
+}
+
+plotGroup <- function(timeUse, code, groupName, title = NULL) {
+  title <- ifelse(is.null(title), activities[as.numeric(substr(code, 1, 2))], title)
+  
+  # Matching input code with tier level of activity
+  code <- ifelse(nchar(code) %% 2 == 0, as.character(code), paste0("0", code))
+  substring(code, 1, 2) <- ifelse(substr(code, 1, 2) == "18", "17", "")
+  substring(code, 1, 2) <- ifelse(substr(code, 1, 2) == "50", "18", "")
+  codeLevel <- codeColumn(code)
+  
+  # Getting relevant aggregations
+  temp <- category(groupName)
+  lineCat <- temp$lineCat
+  group <- temp$group
+  
+  # Aggregating to appropriate activity level
+  tempData <- timeUse[as.numeric(eval(codeLevel)) == as.numeric(code),
+                      .(weeklyHoursLevel = sum(weeklyHours)),
+                      by = .(TUCASEID, TEWHERE, GEMETSTA, GTMETSTA, PEEDUCA, 
+                             PEHSPNON, PTDTRACE, TEAGE, TELFS, TESCHENR, 
+                             TESCHLVL, TESEX, TESPEMPNOT, TRCHILDNUM,
+                             TRDPFTPT, TRERNWA, TRYHHCHILD, TUDIARYDAY, 
+                             TUFNWGTP, TUYEAR, home, ageGroup)]
+
+  # Weighted average hours per week spent on activity.
+  graphData <- tempData[, .(meanTime = weighted.mean(weeklyHoursLevel, 
+                                                     w = TUFNWGTP)),
+                       by = eval(group)]
+
+  plots <-  graphData %>% plot_ly(x = ~TUYEAR, y = ~meanTime, type = "scatter",
+                                  mode = "lines", color = as.formula(paste0("~factor(", lineCat, ")"))) %>%
+            layout(title = title,
+                   xaxis = list(title = "Year"),
+                   yaxis = list(title = "Weekly Hours"))
+  return(plots)
+}
+
+# Function to generate subplot titles
+fourTitles <- function(title1, title2, title3, title4) {
+  annotations = list(
+    list(
+      x = 0.225, 
+      y = 1.0, 
+      font = list(size = 16), 
+      showarrow = FALSE, 
+      text = title1, 
+      xanchor = "center", 
+      xref = "paper", 
+      yanchor = "bottom", 
+      yref = "paper"
+    ), 
+    list(
+      x = 0.775, 
+      y = 1.0, 
+      font = list(size = 16), 
+      showarrow = FALSE, 
+      text = title2, 
+      xanchor = "center", 
+      xref = "paper", 
+      yanchor = "bottom", 
+      yref = "paper"
+    ), 
+    list(
+      x = 0.225, 
+      y = 0.375, 
+      font = list(size = 16), 
+      showarrow = FALSE, 
+      text = title3, 
+      xanchor = "center", 
+      xref = "paper", 
+      yanchor = "bottom", 
+      yref = "paper"
+    ), 
+    list(
+      x = 0.775, 
+      y = 0.375, 
+      font = list(size = 16), 
+      showarrow = FALSE, 
+      text = title4, 
+      xanchor = "center", 
+      xref = "paper", 
+      yanchor = "bottom", 
+      yref = "paper"
+    )
+  )
+  return(annotations)
+}
+```
+
+## Trends in Time Use by Gender
+Here are the graphs (left to right from top left: Personal Care; Household Activities; Caring for and Helping Household Members; Caring for and Helping non-Household members)
+```{r genderPlotting, echo=TRUE, warning=FALSE}
+plots <- lapply(c(1:16, 18, 50), function(x) plotGroup(timeUse, x, "sex"))
+suppressWarnings(subplot(plots[1:4], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Personal Care",
+                                                   "Household Activities",
+                                                   "Caring for HH Members",
+                                                   "Caring for non-HH Members")))
+```
+
+Here are the graphs (left to right from top left: Work; Education; Consumer Purchases; Professional and Personal Care Services)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[5:8], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Work",
+                                                   "Education",
+                                                   "Consumer Purchases",
+                                                   "Professional Services")))
+```
+
+Here are the graphs (clockwise from top left: Household Services; Government Services; Eating and Drinking; Socializing, Relaxing and Leisure)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[9:12], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Household Services",
+                                                   "Government Services",
+                                                   "Eating and Drinking",
+                                                   "Socializing, Relaxing, and Leisure")))
+```
+
+Here are the graphs (clockwise from top left: Sports, Exercise and Recreation; Religion; Volunteer; Telephone Calls)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[13:16], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Sports, Exercise, and Rec",
+                                                   "Religion",
+                                                   "Volunteer",
+                                                   "Telephone Calls")))
+```
+
+Here is the last graph for travel and unknown
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[17:18], margin = 0.12, nrows = 1) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Travel", "Unknown", "", "")))
+```
+
+## Trends in Time Use by Age Group
+The age groups are as follows: 18-24, 25-54, 55-64, 65+. 
+
+Here are the graphs (left to right from top left: Personal Care; Household Activities; Caring for and Helping Household Members; Caring for and Helping non-Household members)
+```{r agePlotting, echo=TRUE, warning=FALSE}
+plots <- lapply(c(1:16, 18, 50), function(x) plotGroup(timeUse, x, "age"))
+suppressWarnings(subplot(plots[1:4], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Personal Care",
+                                                   "Household Activities",
+                                                   "Caring for HH Members",
+                                                   "Caring for non-HH Members")))
+```
+
+Here are the graphs (left to right from top left: Work; Education; Consumer Purchases; Professional and Personal Care Services)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[5:8], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Work",
+                                                   "Education",
+                                                   "Consumer Purchases",
+                                                   "Professional Services")))
+```
+
+Here are the graphs (clockwise from top left: Household Services; Government Services; Eating and Drinking; Socializing, Relaxing and Leisure)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[9:12], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Household Services",
+                                                   "Government Services",
+                                                   "Eating and Drinking",
+                                                   "Socializing, Relaxing, and Leisure")))
+```
+
+Here are the graphs (clockwise from top left: Sports, Exercise and Recreation; Religion; Volunteer; Telephone Calls)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[13:16], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Sports, Exercise, and Rec",
+                                                   "Religion",
+                                                   "Volunteer",
+                                                   "Telephone Calls")))
+```
+
+Here is the last graph for travel and unknown
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[17:18], margin = 0.12, nrows = 1) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Travel", "Unknown", "", "")))
+```
+
+## Trends in Time Use by Age and Gender
+
+Here are the graphs (left to right from top left: Personal Care; Household Activities; Caring for and Helping Household Members; Caring for and Helping non-Household members)
+```{r ageSexPlotting, echo=TRUE, warning=FALSE}
+plots <- lapply(c(1:16, 18, 50), function(x) plotGroup(timeUse, x, "metro"))
+suppressWarnings(subplot(plots[1:4], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Personal Care",
+                                                   "Household Activities",
+                                                   "Caring for HH Members",
+                                                   "Caring for non-HH Members")))
+```
+
+Here are the graphs (left to right from top left: Work; Education; Consumer Purchases; Professional and Personal Care Services)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[5:8], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Work",
+                                                   "Education",
+                                                   "Consumer Purchases",
+                                                   "Professional Services")))
+```
+
+Here are the graphs (clockwise from top left: Household Services; Government Services; Eating and Drinking; Socializing, Relaxing and Leisure)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[9:12], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Household Services",
+                                                   "Government Services",
+                                                   "Eating and Drinking",
+                                                   "Socializing, Relaxing, and Leisure")))
+```
+
+Here are the graphs (clockwise from top left: Sports, Exercise and Recreation; Religion; Volunteer; Telephone Calls)
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[13:16], margin = 0.12, nrows = 2) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Sports, Exercise, and Rec",
+                                                   "Religion",
+                                                   "Volunteer",
+                                                   "Telephone Calls")))
+```
+
+Here is the last graph for travel and unknown
+```{r, echo=TRUE, warning=FALSE}
+suppressWarnings(subplot(plots[17:18], margin = 0.12, nrows = 1) %>% 
+                   layout(title = "", 
+                          annotations = fourTitles("Travel", "Unknown", "", "")))
+```
+
+
+# Location Analysis
+First we collapse from the 6 digit activity level to the 2-digit activity level
+by household and location to start conducting the analysis of where people 
+are spending their time.
+```{r, echo=FALSE, warning=FALSE}
+load(file = "~/Desktop/TimeData/data/timeUseClean.rda")
+
+# Summing time spent at each location for each two digit level activity by 
+# household and year to get average weekly hours while preserving all 
+# household information.
+timeUse <- timeUse[, .(weeklyHours = sum(TUACTDUR24) / 60 * 7),
+                   by = .(TUCASEID, TRTIER1P, TEWHERE, GEMETSTA,
+                          GTMETSTA, PEEDUCA, PEHSPNON, PTDTRACE, TEAGE, TELFS,
+                          TESCHENR, TESCHLVL, TESEX, TESPEMPNOT, TRCHILDNUM,
+                          TRDPFTPT, TRERNWA, TRYHHCHILD, TUDIARYDAY, TUFNWGTP,
+                          TUYEAR, home, ageGroup)]
+
+# Saving cleaned data
+save(timeUse, file = "~/Desktop/TimeData/data/timeUseLocation.rda", compress = TRUE)
+rm(list = ls())
+```
+
+First, we'll just look at the share of time spent at each location by 2-digit activity
+```{r}
+load(file = "~/Desktop/TimeData/data/timeUseLocation.rda")
+timeUse <- timeUse[, .(hours = weighted.mean(weeklyHours, w = TUFNWGTP)), 
+                   by = .(TRTIER1P, TEWHERE, TUYEAR)]
+
+timeUse[TRTIER1P == "Consumer Purchases"] %>% 
+  group_by(TEWHERE) %>%
+  plot_ly(x = ~TUYEAR, y = ~hours, color = ~TEWHERE)
+```
+
